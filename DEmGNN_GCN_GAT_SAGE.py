@@ -4,8 +4,10 @@
 import argparse
 import os
 
+from modules.config import TaskMode, get_dataset_config
+
 parser = argparse.ArgumentParser()
-parser.add_argument('--VERSION', type=str, default='V2', help='V2 is DBLP. Other candidates: IoT, RW, WIDE')
+parser.add_argument('--VERSION', type=str, default='V2', help='V2 is DBLP. Other candidates: V1, IoT, RW, WIDE, wikipedia, reddit, lastfm')
 parser.add_argument('--GNN_TYPE', type=str, default='WeightedGCN', help='GCN, SAGE, GAT, WeightedGCN')
 parser.add_argument('--allow_use_predict_edge_new', type=int, default=0, choices=[0,1], help='1 for use_predict_edge_new')
 parser.add_argument('--use_vanishing_edge_prediction', type=int, default=1, choices=[0,1], help='1 for vanishing_edge_prediction')
@@ -26,7 +28,9 @@ parser.add_argument('--gnn_dropout', type=float, default=0.1, help='dropout rate
 parser.add_argument('--combine_decay_factor', type=float, default=0.5, help='combine_decay_factor')
 parser.add_argument('--HISTORY_LENGTH', type=int, default=4, help='number of history time steps to combine')
 parser.add_argument('--NUM_RUNS', type=int, default=5, help='number of runs')
-parser.add_argument('--gpu', type=str, default='7', help='device')
+parser.add_argument('--gpu', type=str, default=None, help='primary cuda device index or device string (e.g., 0 or cuda:0)')
+parser.add_argument('--gpu2', type=str, default=None, help='secondary cuda device index or device string (e.g., 1 or cuda:1)')
+parser.add_argument('--data_base_path', type=str, default=None, help='base path for dataset and embedding files')
 parser.add_argument('--task', type=int, default=0, choices=[0, 1], help='0: weighted edge prediction, 1: weighted graph completion')
 args = parser.parse_args()
 
@@ -34,9 +38,17 @@ print(args)
 
 import time, random
 
+
+def _normalize_device(device_arg: str, fallback: str) -> str:
+    if device_arg is None:
+        return fallback
+    if device_arg == 'cpu' or device_arg.startswith('cuda'):
+        return device_arg
+    return f'cuda:{device_arg}'
+
+
 model_file = 'temp_model_' + str(int(time.time())) + '_' + str(random.randint(0, 100000)) + '.pt'
 
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 device = 'cuda:0'
 lr = args.lr
 lr2 = args.lr2
@@ -64,64 +76,29 @@ use_predict_edge_new = False
 
 VERSION = args.VERSION
 
-if VERSION == 'V1':
-    sample_file = 'samples_DBLP_20241208.pt'
-    sample_file_completion = 'samples_DBLP_20250119_V1_completion.pt'
-    data_path = '/f/code/IDEA_data/DBLP_data/dataset_filtered_20241127'
+dataset_config = get_dataset_config(VERSION, args.task, base_path=args.data_base_path)
+sample_file = dataset_config['sample_file']
+sample_file_completion = dataset_config['sample_file_completion']
+data_path = dataset_config['data_path']
+seq_length = dataset_config['seq_length']
+valid_seq_length = dataset_config['valid_seq_length']
+device = _normalize_device(args.gpu, dataset_config['device'])
+device2 = _normalize_device(args.gpu2, dataset_config['device2'])
+embedding_file = dataset_config['embedding_file']
+embedding_multiple_times = dataset_config['embedding_multiple_times']
+num_nodes = dataset_config.get('num_nodes')
 
-    seq_length = 7
-    valid_seq_length = 2
-    device2 = 'cuda:1'
-    embedding_file = 'author_embeddings.npy'
-    embedding_multiple_times = True
-elif VERSION == 'V2':
-    sample_file = 'samples_DBLP_20241215.pt'
-    sample_file_completion = 'samples_DBLP_20250119_V2_completion.pt'
-    data_path = '/f/code/IDEA_data/DBLP_data/dataset_filtered_20241215'
-
-    seq_length = 14
-    valid_seq_length = 3
-    device2 = 'cuda:0'
-    embedding_file = 'author_embeddings.npy'
-    embedding_multiple_times = True
-elif VERSION == 'IoT':
-    sample_file = 'samples_IoT_20250108.pt'
-    sample_file_completion = 'samples_IoT_20250119_completion.pt'
-    data_path = '/f/code/IDEA_data/IoT_data'
-
-    seq_length = 84
-    valid_seq_length = 10
-    device2 = 'cuda:0'
-    embedding_file = '../IoT_feat.npy'
-    embedding_multiple_times = False
-elif VERSION == 'WIDE':
-    sample_file = 'samples_WIDE_20250108.pt'
-    sample_file_completion = 'samples_WIDE_20250119_completion.pt'
-    data_path = '/f/code/IDEA_data/WIDE_data'
-
-    seq_length = 740
-    valid_seq_length = 10
-    device = 'cpu'
-    device2 = 'cpu'
-    embedding_file = '../../RP09/IDEA/data/WIDE_feat.npy'
-    embedding_multiple_times = False
-elif VERSION == 'RW':
-    sample_file = 'samples_RW_20250109.pt'
-    sample_file_completion = 'samples_RW_20250119_completion.pt'
-    data_path = '/f/code/IDEA_data/RW_data'
-
-    seq_length = 140
-    valid_seq_length = 10
-    device2 = 'cuda:0'
-    embedding_file = None
-    embedding_multiple_times = False
-    num_nodes = 1000
-else:
-    raise ValueError('VERSION must be one of "V1", "V2", "IoT", "RW", "WIDE"')
+visible_devices = []
+for dev in (device, device2):
+    if dev.startswith('cuda'):
+        parts = dev.split(':', 1)
+        visible_devices.append(parts[1] if len(parts) > 1 else '0')
+if visible_devices:
+    os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(dict.fromkeys(visible_devices))
 
 class TASKS:
-    WEIGHTED_EDGE_PREDICTION = 0
-    WEIGHTED_GRAPH_COMPLETION = 1
+    WEIGHTED_EDGE_PREDICTION = TaskMode.WEIGHTED_EDGE_PREDICTION
+    WEIGHTED_GRAPH_COMPLETION = TaskMode.WEIGHTED_GRAPH_COMPLETION
 
 if args.task == TASKS.WEIGHTED_EDGE_PREDICTION:
     print('Weighted edge prediction')

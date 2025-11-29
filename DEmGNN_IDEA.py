@@ -1,4 +1,7 @@
 import os, argparse
+from typing import Optional
+
+from modules.config import TaskMode, get_dataset_config
 
 parser = argparse.ArgumentParser(description='Modified Code for direction embedding')
 parser.add_argument('--data_name', type=str, default='IoT', choices=['IoT', 'WIDE', 'HMob', 'V1', 'V2', 'Mesh-1', 'T-Drive', 'DC', 'random_walk', 'RW'], help='Name of the dataset')
@@ -23,7 +26,8 @@ parser.add_argument('--use_BCE_loss', type=bool, default=True)
 parser.add_argument('--use_noise_input', dest='use_noise_input', action='store_true')
 parser.add_argument('--no-use_noise_input', dest='use_noise_input', action='store_false')
 parser.add_argument('--eval_on_train', dest='eval_on_train', action='store_true')
-parser.add_argument('--gpu', type=str, default='2')
+parser.add_argument('--gpu', type=str, default=None)
+parser.add_argument('--data_base_path', type=str, default=None, help='base path for dataset and embedding files')
 parser.add_argument('--num_start_weight_mapping', type=int, default=50)
 parser.set_defaults(use_noise_input=True)
 parser.set_defaults(eval_on_train=False)
@@ -38,7 +42,40 @@ import time, random
 model_file = 'temp_model_IDEA_' + str(int(time.time())) + '_' + str(random.randint(0, 100000)) + '.pt'
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
-os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
+
+
+def _resolve_optional_path(base_path: Optional[str], maybe_path: Optional[str]) -> Optional[str]:
+    if maybe_path is None:
+        return None
+    if os.path.isabs(maybe_path):
+        return maybe_path
+    if base_path:
+        return os.path.abspath(os.path.join(base_path, maybe_path))
+    return maybe_path
+
+
+def _normalize_device(device_arg: Optional[str], fallback: str) -> str:
+    if device_arg is None:
+        return fallback
+    if device_arg == 'cpu' or device_arg.startswith('cuda'):
+        return device_arg
+    return f'cuda:{device_arg}'
+
+
+dataset_config = None
+if args.data_name in {'IoT', 'WIDE', 'V1', 'V2', 'RW'}:
+    dataset_config = get_dataset_config(
+        args.data_name,
+        TaskMode.WEIGHTED_EDGE_PREDICTION,
+        base_path=args.data_base_path,
+    )
+
+selected_device = _normalize_device(args.gpu, (dataset_config or {}).get('device', 'cuda:0'))
+if selected_device == 'cpu':
+    os.environ['CUDA_VISIBLE_DEVICES'] = ''
+elif selected_device.startswith('cuda'):
+    parts = selected_device.split(':', 1)
+    os.environ['CUDA_VISIBLE_DEVICES'] = parts[1] if len(parts) > 1 else selected_device
 
 cache_folder = 'data/cache'
 os.makedirs(cache_folder, exist_ok=True)
@@ -53,6 +90,8 @@ from torch.nn.modules.module import Module
 from utils import *
 import random
 import os
+
+device = torch.device('cuda' if selected_device.startswith('cuda') and torch.cuda.is_available() else 'cpu')
 
 class GraphNeuralNetwork(Module):
     '''
@@ -87,8 +126,6 @@ class GraphNeuralNetwork(Module):
         agg_output = self.dropout_layer(agg_output)
 
         return agg_output
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 class DEmb_GenNet_base(nn.Module):
     '''
@@ -337,8 +374,6 @@ def get_direction_loss2(base_vec, base_vec2, direc_vec):
 
     return loss
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 def setup_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -370,7 +405,7 @@ if args.use_self_defined_predict_function:
     assert not args.use_weight_map, 'Cannot use both self defined predict function and weight map'
 
 if data_name == 'IoT':
-    sample_file_name = 'samples_IoT_20250108.pt'
+    sample_file_name = (dataset_config or {}).get('sample_file', 'samples_IoT_20250108.pt')
     num_nodes_gbl = 668
     num_nodes = num_nodes_gbl
     num_snaps = 144
@@ -438,13 +473,13 @@ elif data_name in ['V1', 'V2']:
         num_snaps = 11
         num_test_snaps = 2
         num_val_snaps = 2
-        sample_file_name = 'samples_DBLP_20241208.pt'
+        sample_file_name = (dataset_config or {}).get('sample_file', 'samples_DBLP_20241208.pt')
     elif data_name == 'V2':
         num_nodes = 3789
         num_snaps = 20
         num_test_snaps = 3
         num_val_snaps = 3
-        sample_file_name = 'samples_DBLP_20241215.pt'
+        sample_file_name = (dataset_config or {}).get('sample_file', 'samples_DBLP_20241215.pt')
 
     num_nodes_gbl = num_nodes
     max_thres = 10
@@ -465,7 +500,7 @@ elif data_name in ['V1', 'V2']:
 
     data_name = 'DBLP'
 elif data_name in ['RW', 'random_walk']:
-    sample_file_name = 'samples_RW_20250109.pt'
+    sample_file_name = (dataset_config or {}).get('sample_file', 'samples_RW_20250109.pt')
     num_nodes = 1000
     num_nodes_gbl = num_nodes
     num_snaps = 200
